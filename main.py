@@ -14,7 +14,11 @@ BOT_TOKEN = os.getenv("BOT_T")  # Bot token (optional if using user account)
 GOFILE_API_KEY = os.getenv("GOFILEAPI")  # Gofile API key for fallback storage
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot.log")]
+)
 logger = logging.getLogger(__name__)
 
 # Initialize Encryption
@@ -79,7 +83,7 @@ def decrypt_session_file():
 decrypt_session_file()
 
 # Initialize Telethon Client
-client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
 
 @client.on(events.NewMessage(pattern="/start"))
 async def start(event):
@@ -90,7 +94,7 @@ async def start(event):
         ]
         await event.respond("🔒 You don't have access! Request admin approval.", buttons=buttons)
         return
-
+    
     welcome_message = (
         "👋 Welcome to the YouTube Downloader Bot!\n\n"
         "Here are the available commands:\n"
@@ -276,6 +280,6 @@ async def on_shutdown(event):
 # Start the client
 if __name__ == "__main__":
     logger.info("Bot is running...")
-    client.start()
+    client.start(bot_token=BOT_TOKEN)  # Pass the bot token here
     logger.info("Connected to Telegram!")
     client.run_until_disconnected()
