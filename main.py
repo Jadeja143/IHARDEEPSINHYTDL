@@ -106,7 +106,17 @@ async def start(event):
         await event.respond("🔒 You don't have access! Request admin approval.", buttons=buttons)
         return
 
-    welcome_message = "👋 Welcome to the YouTube Downloader Bot! Send a YouTube link to download."
+    welcome_message = "👋 Welcome to the YouTube Downloader Bot!
+
+Here are the available commands:
+/start - Start the bot
+/admins - View the list of admins and authorized users (Admin Only)
+/remove_user <user_id> - Remove a user from authorized users (Admin Only)
+/add_admin <user_id> - Add a new admin (Admin Only)
+
+To download a video or audio, simply send a valid YouTube link.
+
+Made by @i_hardeepsinh"
     await event.respond(welcome_message)
 
 @client.on(events.NewMessage(func=lambda e: e.sender_id in AUTHORIZED_USERS or e.sender_id in ADMINS))
