@@ -53,3 +53,4 @@ websocket-client==1.8.0
 wsproto==1.2.0
 yarl==1.18.3
 yt-dlp==2025.1.26
+flask
