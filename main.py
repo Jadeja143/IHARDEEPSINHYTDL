@@ -8,6 +8,8 @@ from telethon.errors import FloodWaitError
 from cryptography.fernet import Fernet
 from flask import Flask
 import threading
+import signal
+import asyncio
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -245,72 +247,75 @@ async def format_selection(event):
 @client.on(events.CallbackQuery(pattern=r"format_(\w+)"))
 async def handle_format_selection(event):
     """Handle the selected format and proceed with the download."""
-    format_type = event.data.decode().split("_")[1]
-    user_id = event.sender_id
-    # Retrieve the URL from user_data
-    url = user_data.get(user_id, {}).get("url")
-    if not url:
-        await event.respond("❌ No URL found. Please send a valid YouTube link first.")
-        return
-
-    # Simulating human behavior to avoid YouTube detection
-    time.sleep(random.uniform(5, 15))  # Random delay between 5-15 seconds
-
-    ydl_opts = {
-        "progress_hooks": [lambda d: progress_hook(d, user_id)],
-        "ratelimit": 500000,  # Limit speed to mimic human downloading
-        "nocheckcertificate": True,
-        "source_address": "0.0.0.0",  # Prevent blocking
-        "quiet": True
-    }
-
-    # Use stored cookies if available
-    if STORED_COOKIES:
-        # Write cookies to a temporary file for yt_dlp
-        with open("temp_cookies.txt", "w") as f:
-            f.write(STORED_COOKIES)
-        ydl_opts["cookiefile"] = "temp_cookies.txt"
-
-    if format_type == "audio":
-        ydl_opts["format"] = "bestaudio/best"
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-    elif format_type == "best":
-        ydl_opts["format"] = "bestvideo+bestaudio/best"
-    else:
-        resolution = "1080" if format_type == "1080p" else "720" if format_type == "720p" else "480"
-        ydl_opts["format"] = f"bestvideo[height<={resolution}]+bestaudio/best"
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            filename = ydl.prepare_filename(info)
-            await event.answer("✅ Downloading...")
-            ydl.download([url])
-        # Sanitize the file name
-        if not os.path.exists(filename):
-            filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
-        # Send initial upload progress message
-        progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
-        # Upload the file to Telegram with progress bar
-        async with client.action(user_id, 'document'):
-            await client.send_file(
-                user_id,
-                filename,
-                caption="✅ Here's your file!",
-                progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
-            )
-        # Delete the file after sending
-        if os.path.exists(filename):
-            os.remove(filename)
-        # Clean up temporary cookies file
-        if os.path.exists("temp_cookies.txt"):
-            os.remove("temp_cookies.txt")
-    except yt_dlp.utils.DownloadError as e:
-        await event.respond(f"❌ Download failed: {str(e)}")
-    except FloodWaitError as e:
-        await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
+        format_type = event.data.decode().split("_")[1]
+        user_id = event.sender_id
+        # Retrieve the URL from user_data
+        url = user_data.get(user_id, {}).get("url")
+        if not url:
+            await event.respond("❌ No URL found. Please send a valid YouTube link first.")
+            return
+
+        # Simulating human behavior to avoid YouTube detection
+        time.sleep(random.uniform(1, 5))  # Reduced delay to 1-5 seconds
+
+        ydl_opts = {
+            "progress_hooks": [lambda d: progress_hook(d, user_id)],
+            "nocheckcertificate": True,
+            "source_address": "0.0.0.0",  # Prevent blocking
+            "quiet": True
+        }
+
+        # Use stored cookies if available
+        if STORED_COOKIES:
+            # Write cookies to a temporary file for yt_dlp
+            with open("temp_cookies.txt", "w") as f:
+                f.write(STORED_COOKIES)
+            ydl_opts["cookiefile"] = "temp_cookies.txt"
+
+        if format_type == "audio":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+        elif format_type == "best":
+            ydl_opts["format"] = "bestvideo+bestaudio/best"
+        else:
+            resolution = "1080" if format_type == "1080p" else "720" if format_type == "720p" else "480"
+            ydl_opts["format"] = f"bestvideo[height<={resolution}]+bestaudio/best"
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                filename = ydl.prepare_filename(info)
+                await event.answer("✅ Downloading...")
+                ydl.download([url])
+            # Sanitize the file name
+            if not os.path.exists(filename):
+                filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
+            # Send initial upload progress message
+            progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+            # Upload the file to Telegram with progress bar
+            async with client.action(user_id, 'document'):
+                await client.send_file(
+                    user_id,
+                    filename,
+                    caption="✅ Here's your file!",
+                    progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
+                )
+            # Delete the file after sending
+            if os.path.exists(filename):
+                os.remove(filename)
+            # Clean up temporary cookies file
+            if os.path.exists("temp_cookies.txt"):
+                os.remove("temp_cookies.txt")
+        except yt_dlp.utils.DownloadError as e:
+            await event.respond(f"❌ Download failed: {str(e)}")
+        except FloodWaitError as e:
+            await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
+        except Exception as e:
+            await event.respond(f"❌ Error: {str(e)}")
     except Exception as e:
-        await event.respond(f"❌ Error: {str(e)}")
+        logger.error(f"❌ Error handling callback query: {e}")
+        await event.respond("❌ An error occurred while processing your request. Please try again.")
 
 async def progress_hook(d, user_id):
     """Send real-time download progress to the user."""
@@ -319,18 +324,39 @@ async def progress_hook(d, user_id):
         speed = d['_speed_str']
         eta = d['_eta_str']
         message = f"📥 Downloading... {progress} | Speed: {speed} | ETA: {eta}"
-        await client.send_message(user_id, message)
+        asyncio.create_task(client.send_message(user_id, message))
 
 async def upload_progress(current, total, user_id, progress_message):
-    """Update the upload progress in real-time."""
+    """Update the upload progress in real-time, but only every 10 seconds or when the upload is complete."""
     percentage = round((current / total) * 100, 2)
-    await client.edit_message(user_id, progress_message, f"📤 Uploading... {percentage}%")
+    last_update_time = user_data.get(user_id, {}).get("last_upload_update", 0)
+    current_time = time.time()
 
-# Encrypt the session file after bot shutdown
-@client.on(events.Raw())
-async def on_shutdown(event):
-    if event.type == "stop":
-        encrypt_session_file()
+    # Update only if 10 seconds have passed since the last update or if the upload is complete
+    if current_time - last_update_time >= 10 or percentage == 100:
+        try:
+            await client.edit_message(user_id, progress_message, f"📤 Uploading... {percentage}%")
+            user_data[user_id]["last_upload_update"] = current_time  # Update the last update time
+        except FloodWaitError as e:
+            logger.warning(f"Flood wait error during upload progress: Retry after {e.seconds} seconds.")
+            await asyncio.sleep(e.seconds)  # Wait for the required duration
+            await client.edit_message(user_id, progress_message, f"📤 Uploading... {percentage}%")
+            user_data[user_id]["last_upload_update"] = time.time()  # Update the last update time
+
+# Graceful Shutdown Handler
+async def graceful_shutdown():
+    logger.info("Gracefully shutting down...")
+    encrypt_session_file()
+    await client.disconnect()
+
+# Handle SIGTERM (used by Render to stop the service)
+def handle_sigterm(signum, frame):
+    logger.info("SIGTERM received. Initiating graceful shutdown...")
+    asyncio.create_task(graceful_shutdown())
+
+# Register the SIGTERM handler
+signal.signal(signal.SIGTERM, handle_sigterm)
+
 
 # Start the client
 if __name__ == "__main__":
