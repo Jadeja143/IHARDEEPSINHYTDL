@@ -30,7 +30,6 @@ ENCRYPTED_API_ID = os.getenv("ENCRYPTED_API_ID")  # Encrypted Telegram API ID
 ENCRYPTED_API_HASH = os.getenv("ENCRYPTED_API_HASH")  # Encrypted Telegram API Hash
 ENCRYPTED_ADMINS = os.getenv("ENCRYPTED_ADMINS")  # Encrypted comma-separated admin IDs
 BOT_TOKEN = os.getenv("BOT_T")  # Bot token (optional if using user account)
-GOFILE_API_KEY = os.getenv("GOFILEAPI")  # Gofile API key for fallback storage
 
 # Set up logging
 logging.basicConfig(
@@ -121,8 +120,8 @@ async def start(event):
         "Here are the available commands:\n"
         "/start - Start the bot\n"
         "/admins - View the list of admins and authorized users (Admin Only)\n"
-        "/remove_user <user_id> - Remove a user from authorized users (Admin Only)\n"
-        "/add_admin <user_id> - Add a new admin (Admin Only)\n"
+        "/remove_user  - Remove a user from authorized users (Admin Only)\n"
+        "/add_admin  - Add a new admin (Admin Only)\n"
         "/upload_cookies - Upload cookies.txt (Admin Only)\n\n"
         "To download a video or audio, simply send a valid YouTube link.\n\n"
         "Made by @i_hardeepsinh"
@@ -219,6 +218,9 @@ async def receive_cookies(event):
         try:
             # Store the decrypted cookies in memory
             STORED_COOKIES = raw_cookies.decode()
+            # Write cookies to a temporary file for validation
+            with open("temp_cookies.txt", "w") as f:
+                f.write(STORED_COOKIES)
             await event.respond("✅ `cookies.txt` stored in memory!")
         except Exception as e:
             logger.error(f"❌ Failed to process cookies: {e}")
@@ -272,6 +274,9 @@ async def handle_format_selection(event):
             with open("temp_cookies.txt", "w") as f:
                 f.write(STORED_COOKIES)
             ydl_opts["cookiefile"] = "temp_cookies.txt"
+            logger.info("🍪 Using cookies from temp_cookies.txt")
+        else:
+            logger.warning("⚠️ No cookies available. Falling back to default behavior.")
 
         if format_type == "audio":
             ydl_opts["format"] = "bestaudio/best"
@@ -288,11 +293,14 @@ async def handle_format_selection(event):
                 filename = ydl.prepare_filename(info)
                 await event.answer("✅ Downloading...")
                 ydl.download([url])
+
             # Sanitize the file name
             if not os.path.exists(filename):
                 filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
+
             # Send initial upload progress message
             progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+
             # Upload the file to Telegram with progress bar
             async with client.action(user_id, 'document'):
                 await client.send_file(
@@ -301,17 +309,22 @@ async def handle_format_selection(event):
                     caption="✅ Here's your file!",
                     progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
                 )
+
             # Delete the file after sending
             if os.path.exists(filename):
                 os.remove(filename)
+
             # Clean up temporary cookies file
             if os.path.exists("temp_cookies.txt"):
                 os.remove("temp_cookies.txt")
+
         except yt_dlp.utils.DownloadError as e:
+            logger.error(f"❌ Download failed: {str(e)}")
             await event.respond(f"❌ Download failed: {str(e)}")
         except FloodWaitError as e:
             await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
         except Exception as e:
+            logger.error(f"❌ Error: {str(e)}")
             await event.respond(f"❌ Error: {str(e)}")
     except Exception as e:
         logger.error(f"❌ Error handling callback query: {e}")
@@ -331,7 +344,6 @@ async def upload_progress(current, total, user_id, progress_message):
     percentage = round((current / total) * 100, 2)
     last_update_time = user_data.get(user_id, {}).get("last_upload_update", 0)
     current_time = time.time()
-
     # Update only if 10 seconds have passed since the last update or if the upload is complete
     if current_time - last_update_time >= 10 or percentage == 100:
         try:
@@ -356,7 +368,6 @@ def handle_sigterm(signum, frame):
 
 # Register the SIGTERM handler
 signal.signal(signal.SIGTERM, handle_sigterm)
-
 
 # Start the client
 if __name__ == "__main__":
