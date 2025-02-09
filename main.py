@@ -10,9 +10,6 @@ from flask import Flask
 import threading
 import signal
 import asyncio
-from torpy import TorClient
-from torpy.http.requests import TorRequests
-import ssl
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -77,41 +74,32 @@ PENDING_REQUESTS = set()
 # Temporary User Data Storage
 user_data = {}
 
-# Tor Integration
-TOR_SOCKS_PORT = 9050  # Default Tor SOCKS port
-TOR_CONTROL_PORT = 9051  # Default Tor control port
-TOR_PASSWORD = "your_tor_password"  # Set this in your Tor configuration
+# Session File Encryption
+SESSION_FILE = "bot_session.session"
+ENCRYPTED_SESSION_FILE = "bot_session_encrypted.session"
 
-def get_tor_session():
-    """Create a new Tor session."""
-    tor_client = TorClient()
-    return tor_client.get_guard()
+def encrypt_session_file():
+    """Encrypt the session file after bot shutdown."""
+    if os.path.exists(SESSION_FILE):
+        with open(SESSION_FILE, "rb") as f:
+            session_data = f.read()
+        encrypted_data = cipher.encrypt(session_data)
+        with open(ENCRYPTED_SESSION_FILE, "wb") as f:
+            f.write(encrypted_data)
+        os.remove(SESSION_FILE)  # Remove the unencrypted session file
 
-def rotate_tor_circuit():
-    """Rotate the Tor circuit to get a new IP."""
-    with TorRequests() as tor_requests:
-        tor_requests.reset_identity()
+def decrypt_session_file():
+    """Decrypt the session file before bot initialization."""
+    if os.path.exists(ENCRYPTED_SESSION_FILE):
+        with open(ENCRYPTED_SESSION_FILE, "rb") as f:
+            encrypted_data = f.read()
+        decrypted_data = cipher.decrypt(encrypted_data)
+        with open(SESSION_FILE, "wb") as f:
+            f.write(decrypted_data)
+        os.remove(ENCRYPTED_SESSION_FILE)  # Remove the encrypted session file
 
-# Patch for SSL compatibility with Python 3.12+
-def patch_ssl_for_torpy():
-    """
-    Patch the ssl module to ensure compatibility with Python 3.12+.
-    This replaces the deprecated `ssl.wrap_socket` with `SSLContext.wrap_socket`.
-    """
-    from torpy.cell_socket import TorCellSocket  # Updated import
-    original_connect = TorCellSocket.connect  # Use TorCellSocket instead of TorSocket
-
-    def patched_connect(self):
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        self._socket = context.wrap_socket(self._socket, do_handshake_on_connect=True)
-        return original_connect(self)
-
-    TorCellSocket.connect = patched_connect
-
-# Apply the SSL patch
-patch_ssl_for_torpy()
+# Decrypt the session file before starting the bot
+decrypt_session_file()
 
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
@@ -133,8 +121,8 @@ async def start(event):
         "Here are the available commands:\n"
         "/start - Start the bot\n"
         "/admins - View the list of admins and authorized users (Admin Only)\n"
-        "/remove_user  - Remove a user from authorized users (Admin Only)\n"
-        "/add_admin  - Add a new admin (Admin Only)\n"
+        "/remove_user <user_id> - Remove a user from authorized users (Admin Only)\n"
+        "/add_admin <user_id> - Add a new admin (Admin Only)\n"
         "/upload_cookies - Upload cookies.txt (Admin Only)\n\n"
         "To download a video or audio, simply send a valid YouTube link.\n\n"
         "Made by @i_hardeepsinh"
@@ -244,14 +232,9 @@ async def format_selection(event):
     url = event.text
     if not url.startswith(("http://", "https://")):
         return  # Ignore non-YouTube links
-
-    # Rotate Tor circuit for anonymity
-    rotate_tor_circuit()
-
     # Store the URL in user_data
     user_id = event.sender_id
     user_data[user_id] = {"url": url}
-
     buttons = [
         [Button.inline("🎥 Highest Quality", data="format_best")],
         [Button.inline("🎬 1080p", data="format_1080p")],
@@ -267,7 +250,6 @@ async def handle_format_selection(event):
     try:
         format_type = event.data.decode().split("_")[1]
         user_id = event.sender_id
-
         # Retrieve the URL from user_data
         url = user_data.get(user_id, {}).get("url")
         if not url:
@@ -281,13 +263,12 @@ async def handle_format_selection(event):
             "progress_hooks": [lambda d: progress_hook(d, user_id)],
             "nocheckcertificate": True,
             "source_address": "0.0.0.0",  # Prevent blocking
-            "quiet": True,
-            "proxy": f"socks5h://127.0.0.1:{TOR_SOCKS_PORT}",  # Use Tor SOCKS proxy
+            "quiet": True
         }
 
         # Use stored cookies if available
         if STORED_COOKIES:
-            # Write cookies to a temporary file for yt-dlp
+            # Write cookies to a temporary file for yt_dlp
             with open("temp_cookies.txt", "w") as f:
                 f.write(STORED_COOKIES)
             ydl_opts["cookiefile"] = "temp_cookies.txt"
@@ -307,31 +288,25 @@ async def handle_format_selection(event):
                 filename = ydl.prepare_filename(info)
                 await event.answer("✅ Downloading...")
                 ydl.download([url])
-
-                # Sanitize the file name
-                if not os.path.exists(filename):
-                    filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
-
-                # Send initial upload progress message
-                progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
-
-                # Upload the file to Telegram with progress bar
-                async with client.action(user_id, 'document'):
-                    await client.send_file(
-                        user_id,
-                        filename,
-                        caption="✅ Here's your file!",
-                        progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
-                    )
-
-                # Delete the file after sending
-                if os.path.exists(filename):
-                    os.remove(filename)
-
-                # Clean up temporary cookies file
-                if os.path.exists("temp_cookies.txt"):
-                    os.remove("temp_cookies.txt")
-
+            # Sanitize the file name
+            if not os.path.exists(filename):
+                filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
+            # Send initial upload progress message
+            progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+            # Upload the file to Telegram with progress bar
+            async with client.action(user_id, 'document'):
+                await client.send_file(
+                    user_id,
+                    filename,
+                    caption="✅ Here's your file!",
+                    progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
+                )
+            # Delete the file after sending
+            if os.path.exists(filename):
+                os.remove(filename)
+            # Clean up temporary cookies file
+            if os.path.exists("temp_cookies.txt"):
+                os.remove("temp_cookies.txt")
         except yt_dlp.utils.DownloadError as e:
             await event.respond(f"❌ Download failed: {str(e)}")
         except FloodWaitError as e:
