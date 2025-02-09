@@ -56,3 +56,4 @@ yt-dlp==2025.1.26
 flask
 pytube
 youtube-search-python
+torpy
