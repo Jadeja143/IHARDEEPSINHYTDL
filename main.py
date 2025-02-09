@@ -10,6 +10,7 @@ from flask import Flask
 import threading
 import signal
 import asyncio
+import requests
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -74,32 +75,52 @@ PENDING_REQUESTS = set()
 # Temporary User Data Storage
 user_data = {}
 
-# Session File Encryption
-SESSION_FILE = "bot_session.session"
-ENCRYPTED_SESSION_FILE = "bot_session_encrypted.session"
+# Fetch Proxies from ProxyScrape API
+PROXYSCRAPE_API_URL = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
 
-def encrypt_session_file():
-    """Encrypt the session file after bot shutdown."""
-    if os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "rb") as f:
-            session_data = f.read()
-        encrypted_data = cipher.encrypt(session_data)
-        with open(ENCRYPTED_SESSION_FILE, "wb") as f:
-            f.write(encrypted_data)
-        os.remove(SESSION_FILE)  # Remove the unencrypted session file
+def fetch_proxies():
+    """Fetch fresh proxies from the ProxyScrape API."""
+    try:
+        response = requests.get(PROXYSCRAPE_API_URL)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        proxies = response.text.splitlines()
+        logger.info(f"✅ Fetched {len(proxies)} proxies from ProxyScrape.")
+        return proxies
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch proxies: {e}")
+        return []
 
-def decrypt_session_file():
-    """Decrypt the session file before bot initialization."""
-    if os.path.exists(ENCRYPTED_SESSION_FILE):
-        with open(ENCRYPTED_SESSION_FILE, "rb") as f:
-            encrypted_data = f.read()
-        decrypted_data = cipher.decrypt(encrypted_data)
-        with open(SESSION_FILE, "wb") as f:
-            f.write(decrypted_data)
-        os.remove(ENCRYPTED_SESSION_FILE)  # Remove the encrypted session file
+# Test a proxy connection
+async def test_proxy(proxy):
+    """Test if the proxy is working."""
+    ydl_opts = {
+        "proxy": proxy,
+        "quiet": True,
+        "extract_flat": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ", download=False)
+            if info:
+                return True
+    except Exception as e:
+        logger.error(f"❌ Proxy {proxy} failed: {e}")
+    return False
 
-# Decrypt the session file before starting the bot
-decrypt_session_file()
+# Find a working proxy
+async def find_working_proxy(event):
+    """Find a working proxy and notify the user."""
+    proxies = fetch_proxies()
+    if not proxies:
+        await event.respond("❌ No proxies fetched. Please try again later.")
+        return None
+    for proxy in proxies:
+        await event.respond(f"⏳ Testing proxy: {proxy}")
+        if await test_proxy(proxy):
+            await event.respond(f"✅ Connected to proxy: {proxy}")
+            return proxy
+    await event.respond("❌ All proxies failed. Please try again later.")
+    return None
 
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
@@ -219,41 +240,12 @@ async def receive_cookies(event):
         try:
             # Store the decrypted cookies in memory
             STORED_COOKIES = raw_cookies.decode()
-            await event.respond("✅ `cookies.txt` received! Verifying cookies...")
-            
-            # Validate cookies
-            if validate_cookies(STORED_COOKIES):
-                await event.respond("✅ Cookies are valid and ready to use!")
-            else:
-                await event.respond("❌ Cookies are invalid. Please upload a valid `cookies.txt` file.")
-                STORED_COOKIES = None
+            await event.respond("✅ `cookies.txt` stored in memory!")
         except Exception as e:
             logger.error(f"❌ Failed to process cookies: {e}")
             await event.respond("❌ Failed to process cookies. Please try again.")
     else:
         await event.respond("❌ Invalid file. Please send `cookies.txt`.")
-
-def validate_cookies(cookies):
-    """Validate cookies by testing them with yt-dlp."""
-    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  # Test URL
-    ydl_opts = {
-        "cookiefile": "temp_cookies.txt",
-        "quiet": True,
-        "extract_flat": True,
-    }
-    try:
-        with open("temp_cookies.txt", "w") as f:
-            f.write(cookies)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(test_url, download=False)
-            if info:
-                return True
-    except Exception as e:
-        logger.error(f"❌ Cookie validation failed: {e}")
-    finally:
-        if os.path.exists("temp_cookies.txt"):
-            os.remove("temp_cookies.txt")
-    return False
 
 @client.on(events.NewMessage(func=lambda e: e.sender_id in AUTHORIZED_USERS or e.sender_id in ADMINS))
 async def format_selection(event):
@@ -261,9 +253,16 @@ async def format_selection(event):
     url = event.text
     if not url.startswith(("http://", "https://")):
         return  # Ignore non-YouTube links
+
+    # Find a working proxy
+    proxy = await find_working_proxy(event)
+    if not proxy:
+        return
+
     # Store the URL in user_data
     user_id = event.sender_id
     user_data[user_id] = {"url": url}
+
     buttons = [
         [Button.inline("🎥 Highest Quality", data="format_best")],
         [Button.inline("🎬 1080p", data="format_1080p")],
@@ -289,7 +288,6 @@ async def handle_format_selection(event):
         # Simulating human behavior to avoid YouTube detection
         time.sleep(random.uniform(1, 5))  # Reduced delay to 1-5 seconds
 
-        # Configure yt-dlp options
         ydl_opts = {
             "progress_hooks": [lambda d: progress_hook(d, user_id)],
             "nocheckcertificate": True,
@@ -299,11 +297,11 @@ async def handle_format_selection(event):
 
         # Use stored cookies if available
         if STORED_COOKIES:
+            # Write cookies to a temporary file for yt_dlp
             with open("temp_cookies.txt", "w") as f:
                 f.write(STORED_COOKIES)
             ydl_opts["cookiefile"] = "temp_cookies.txt"
 
-        # Configure format options
         if format_type == "audio":
             ydl_opts["format"] = "bestaudio/best"
             ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
@@ -320,39 +318,36 @@ async def handle_format_selection(event):
                 await event.answer("✅ Downloading...")
                 ydl.download([url])
 
-            # Sanitize the file name
-            if not os.path.exists(filename):
-                filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
+                # Sanitize the file name
+                if not os.path.exists(filename):
+                    filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
 
-            # Send initial upload progress message
-            progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+                # Send initial upload progress message
+                progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
 
-            # Upload the file to Telegram with progress bar
-            async with client.action(user_id, 'document'):
-                await client.send_file(
-                    user_id,
-                    filename,
-                    caption="✅ Here's your file!",
-                    progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
-                )
+                # Upload the file to Telegram with progress bar
+                async with client.action(user_id, 'document'):
+                    await client.send_file(
+                        user_id,
+                        filename,
+                        caption="✅ Here's your file!",
+                        progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
+                    )
 
-            # Delete the file after sending
-            if os.path.exists(filename):
-                os.remove(filename)
+                # Delete the file after sending
+                if os.path.exists(filename):
+                    os.remove(filename)
 
-            # Clean up temporary cookies file
-            if os.path.exists("temp_cookies.txt"):
-                os.remove("temp_cookies.txt")
+                # Clean up temporary cookies file
+                if os.path.exists("temp_cookies.txt"):
+                    os.remove("temp_cookies.txt")
 
         except yt_dlp.utils.DownloadError as e:
-            logger.error(f"❌ Download failed: {str(e)}")
             await event.respond(f"❌ Download failed: {str(e)}")
         except FloodWaitError as e:
             await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
         except Exception as e:
-            logger.error(f"❌ Error: {str(e)}")
             await event.respond(f"❌ Error: {str(e)}")
-
     except Exception as e:
         logger.error(f"❌ Error handling callback query: {e}")
         await event.respond("❌ An error occurred while processing your request. Please try again.")
@@ -371,6 +366,7 @@ async def upload_progress(current, total, user_id, progress_message):
     percentage = round((current / total) * 100, 2)
     last_update_time = user_data.get(user_id, {}).get("last_upload_update", 0)
     current_time = time.time()
+
     # Update only if 10 seconds have passed since the last update or if the upload is complete
     if current_time - last_update_time >= 10 or percentage == 100:
         try:
@@ -385,7 +381,6 @@ async def upload_progress(current, total, user_id, progress_message):
 # Graceful Shutdown Handler
 async def graceful_shutdown():
     logger.info("Gracefully shutting down...")
-    encrypt_session_file()
     await client.disconnect()
 
 # Handle SIGTERM (used by Render to stop the service)
