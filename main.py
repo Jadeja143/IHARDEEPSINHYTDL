@@ -1,6 +1,5 @@
 import os
 import logging
-import yt_dlp
 import time
 import random
 from telethon import TelegramClient, events, Button
@@ -10,6 +9,7 @@ from flask import Flask
 import threading
 import signal
 import asyncio
+from pytube import YouTube  # Import PyTube
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -103,9 +103,6 @@ decrypt_session_file()
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
 
-# Global variable to store decrypted cookies in memory
-STORED_COOKIES = None
-
 @client.on(events.NewMessage(pattern="/start"))
 async def start(event):
     user_id = event.sender_id
@@ -121,8 +118,7 @@ async def start(event):
         "/start - Start the bot\n"
         "/admins - View the list of admins and authorized users (Admin Only)\n"
         "/remove_user  - Remove a user from authorized users (Admin Only)\n"
-        "/add_admin  - Add a new admin (Admin Only)\n"
-        "/upload_cookies - Upload cookies.txt (Admin Only)\n\n"
+        "/add_admin  - Add a new admin (Admin Only)\n\n"
         "To download a video or audio, simply send a valid YouTube link.\n\n"
         "Made by @i_hardeepsinh"
     )
@@ -202,32 +198,6 @@ async def add_admin(event):
     except (IndexError, ValueError):
         await event.respond("❌ Usage: /add_admin <user_id>")
 
-@client.on(events.NewMessage(pattern="/upload_cookies"))
-async def request_cookies(event):
-    if event.sender_id in ADMINS:
-        await event.respond("📤 Send the `cookies.txt` file.")
-    else:
-        await event.respond("🚫 You are not authorized to update cookies.")
-
-@client.on(events.NewMessage(func=lambda e: e.file and e.sender_id in ADMINS))
-async def receive_cookies(event):
-    global STORED_COOKIES
-    if event.file.name.lower() == "cookies.txt":
-        # Download the file as bytes
-        raw_cookies = await event.download_media(file=bytes)
-        try:
-            # Store the decrypted cookies in memory
-            STORED_COOKIES = raw_cookies.decode()
-            # Write cookies to a temporary file for validation
-            with open("temp_cookies.txt", "w") as f:
-                f.write(STORED_COOKIES)
-            await event.respond("✅ `cookies.txt` stored in memory!")
-        except Exception as e:
-            logger.error(f"❌ Failed to process cookies: {e}")
-            await event.respond("❌ Failed to process cookies. Please try again.")
-    else:
-        await event.respond("❌ Invalid file. Please send `cookies.txt`.")
-
 @client.on(events.NewMessage(func=lambda e: e.sender_id in AUTHORIZED_USERS or e.sender_id in ADMINS))
 async def format_selection(event):
     """Prompt the user to select a format."""
@@ -248,7 +218,7 @@ async def format_selection(event):
 
 @client.on(events.CallbackQuery(pattern=r"format_(\w+)"))
 async def handle_format_selection(event):
-    """Handle the selected format and proceed with the download."""
+    """Handle the selected format and proceed with the download using PyTube."""
     try:
         format_type = event.data.decode().split("_")[1]
         user_id = event.sender_id
@@ -261,42 +231,28 @@ async def handle_format_selection(event):
         # Simulating human behavior to avoid YouTube detection
         time.sleep(random.uniform(1, 5))  # Reduced delay to 1-5 seconds
 
-        ydl_opts = {
-            "progress_hooks": [lambda d: progress_hook(d, user_id)],
-            "nocheckcertificate": True,
-            "source_address": "0.0.0.0",  # Prevent blocking
-            "quiet": True
-        }
-
-        # Use stored cookies if available
-        if STORED_COOKIES:
-            # Write cookies to a temporary file for yt_dlp
-            with open("temp_cookies.txt", "w") as f:
-                f.write(STORED_COOKIES)
-            ydl_opts["cookiefile"] = "temp_cookies.txt"
-            logger.info("🍪 Using cookies from temp_cookies.txt")
-        else:
-            logger.warning("⚠️ No cookies available. Falling back to default behavior.")
-
-        if format_type == "audio":
-            ydl_opts["format"] = "bestaudio/best"
-            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-        elif format_type == "best":
-            ydl_opts["format"] = "bestvideo+bestaudio/best"
-        else:
-            resolution = "1080" if format_type == "1080p" else "720" if format_type == "720p" else "480"
-            ydl_opts["format"] = f"bestvideo[height<={resolution}]+bestaudio/best"
-
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                filename = ydl.prepare_filename(info)
-                await event.answer("✅ Downloading...")
-                ydl.download([url])
+            yt = YouTube(url)
+            await event.answer("✅ Downloading...")
 
-            # Sanitize the file name
-            if not os.path.exists(filename):
-                filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
+            if format_type == "audio":
+                stream = yt.streams.filter(only_audio=True).first()
+                filename = stream.download(output_path="downloads")
+                # Rename the file to .mp3
+                base, ext = os.path.splitext(filename)
+                new_filename = base + ".mp3"
+                os.rename(filename, new_filename)
+                filename = new_filename
+            elif format_type == "best":
+                stream = yt.streams.get_highest_resolution()
+                filename = stream.download(output_path="downloads")
+            else:
+                resolution = "1080p" if format_type == "1080p" else "720p" if format_type == "720p" else "480p"
+                stream = yt.streams.filter(res=resolution, progressive=True).first()
+                if not stream:
+                    await event.respond(f"❌ No {resolution} stream available. Falling back to best quality.")
+                    stream = yt.streams.get_highest_resolution()
+                filename = stream.download(output_path="downloads")
 
             # Send initial upload progress message
             progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
@@ -314,30 +270,12 @@ async def handle_format_selection(event):
             if os.path.exists(filename):
                 os.remove(filename)
 
-            # Clean up temporary cookies file
-            if os.path.exists("temp_cookies.txt"):
-                os.remove("temp_cookies.txt")
-
-        except yt_dlp.utils.DownloadError as e:
+        except Exception as e:
             logger.error(f"❌ Download failed: {str(e)}")
             await event.respond(f"❌ Download failed: {str(e)}")
-        except FloodWaitError as e:
-            await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
-        except Exception as e:
-            logger.error(f"❌ Error: {str(e)}")
-            await event.respond(f"❌ Error: {str(e)}")
     except Exception as e:
         logger.error(f"❌ Error handling callback query: {e}")
         await event.respond("❌ An error occurred while processing your request. Please try again.")
-
-async def progress_hook(d, user_id):
-    """Send real-time download progress to the user."""
-    if d['status'] == 'downloading':
-        progress = d['_percent_str']
-        speed = d['_speed_str']
-        eta = d['_eta_str']
-        message = f"📥 Downloading... {progress} | Speed: {speed} | ETA: {eta}"
-        asyncio.create_task(client.send_message(user_id, message))
 
 async def upload_progress(current, total, user_id, progress_message):
     """Update the upload progress in real-time, but only every 10 seconds or when the upload is complete."""
