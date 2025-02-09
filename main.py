@@ -98,8 +98,8 @@ def patch_ssl_for_torpy():
     Patch the ssl module to ensure compatibility with Python 3.12+.
     This replaces the deprecated `ssl.wrap_socket` with `SSLContext.wrap_socket`.
     """
-    from torpy.cell_socket import TorSocket
-    original_connect = TorSocket.connect
+    from torpy.cell_socket import TorCellSocket  # Updated import
+    original_connect = TorCellSocket.connect  # Use TorCellSocket instead of TorSocket
 
     def patched_connect(self):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -108,7 +108,7 @@ def patch_ssl_for_torpy():
         self._socket = context.wrap_socket(self._socket, do_handshake_on_connect=True)
         return original_connect(self)
 
-    TorSocket.connect = patched_connect
+    TorCellSocket.connect = patched_connect
 
 # Apply the SSL patch
 patch_ssl_for_torpy()
@@ -287,7 +287,7 @@ async def handle_format_selection(event):
 
         # Use stored cookies if available
         if STORED_COOKIES:
-            # Write cookies to a temporary file for yt_dlp
+            # Write cookies to a temporary file for yt-dlp
             with open("temp_cookies.txt", "w") as f:
                 f.write(STORED_COOKIES)
             ydl_opts["cookiefile"] = "temp_cookies.txt"
@@ -371,6 +371,7 @@ async def upload_progress(current, total, user_id, progress_message):
 # Graceful Shutdown Handler
 async def graceful_shutdown():
     logger.info("Gracefully shutting down...")
+    encrypt_session_file()
     await client.disconnect()
 
 # Handle SIGTERM (used by Render to stop the service)
@@ -380,6 +381,7 @@ def handle_sigterm(signum, frame):
 
 # Register the SIGTERM handler
 signal.signal(signal.SIGTERM, handle_sigterm)
+
 
 # Start the client
 if __name__ == "__main__":
