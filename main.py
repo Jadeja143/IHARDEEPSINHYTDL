@@ -9,7 +9,9 @@ from flask import Flask
 import threading
 import signal
 import asyncio
-from pytube import YouTube  # Import PyTube
+from youtubesearchpython import Video  # Import youtube-search-python
+import ffmpeg
+import requests
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -118,7 +120,8 @@ async def start(event):
         "/start - Start the bot\n"
         "/admins - View the list of admins and authorized users (Admin Only)\n"
         "/remove_user  - Remove a user from authorized users (Admin Only)\n"
-        "/add_admin  - Add a new admin (Admin Only)\n\n"
+        "/add_admin  - Add a new admin (Admin Only)\n"
+        "/upload_cookies - Upload cookies.txt (Admin Only)\n\n"
         "To download a video or audio, simply send a valid YouTube link.\n\n"
         "Made by @i_hardeepsinh"
     )
@@ -198,6 +201,29 @@ async def add_admin(event):
     except (IndexError, ValueError):
         await event.respond("❌ Usage: /add_admin <user_id>")
 
+@client.on(events.NewMessage(pattern="/upload_cookies"))
+async def request_cookies(event):
+    if event.sender_id in ADMINS:
+        await event.respond("📤 Send the `cookies.txt` file.")
+    else:
+        await event.respond("🚫 You are not authorized to update cookies.")
+
+@client.on(events.NewMessage(func=lambda e: e.file and e.sender_id in ADMINS))
+async def receive_cookies(event):
+    global STORED_COOKIES
+    if event.file.name.lower() == "cookies.txt":
+        # Download the file as bytes
+        raw_cookies = await event.download_media(file=bytes)
+        try:
+            # Store the decrypted cookies in memory
+            STORED_COOKIES = raw_cookies.decode()
+            await event.respond("✅ `cookies.txt` stored in memory!")
+        except Exception as e:
+            logger.error(f"❌ Failed to process cookies: {e}")
+            await event.respond("❌ Failed to process cookies. Please try again.")
+    else:
+        await event.respond("❌ Invalid file. Please send `cookies.txt`.")
+
 @client.on(events.NewMessage(func=lambda e: e.sender_id in AUTHORIZED_USERS or e.sender_id in ADMINS))
 async def format_selection(event):
     """Prompt the user to select a format."""
@@ -218,64 +244,80 @@ async def format_selection(event):
 
 @client.on(events.CallbackQuery(pattern=r"format_(\w+)"))
 async def handle_format_selection(event):
-    """Handle the selected format and proceed with the download using PyTube."""
+    """Handle the selected format and proceed with the download."""
     try:
         format_type = event.data.decode().split("_")[1]
         user_id = event.sender_id
+
         # Retrieve the URL from user_data
         url = user_data.get(user_id, {}).get("url")
         if not url:
             await event.respond("❌ No URL found. Please send a valid YouTube link first.")
             return
 
-        # Simulating human behavior to avoid YouTube detection
-        time.sleep(random.uniform(1, 5))  # Reduced delay to 1-5 seconds
+        # Simulating human-like delays to avoid detection
+        time.sleep(random.uniform(5, 10))  # Increased delay to 5-10 seconds
 
-        try:
-            yt = YouTube(url)
-            await event.answer("✅ Downloading...")
+        await event.answer("✅ Fetching video metadata...")
+        video = Video.getInfo(url)
 
-            if format_type == "audio":
-                stream = yt.streams.filter(only_audio=True).first()
-                filename = stream.download(output_path="downloads")
-                # Rename the file to .mp3
-                base, ext = os.path.splitext(filename)
-                new_filename = base + ".mp3"
-                os.rename(filename, new_filename)
-                filename = new_filename
-            elif format_type == "best":
-                stream = yt.streams.get_highest_resolution()
-                filename = stream.download(output_path="downloads")
-            else:
-                resolution = "1080p" if format_type == "1080p" else "720p" if format_type == "720p" else "480p"
-                stream = yt.streams.filter(res=resolution, progressive=True).first()
-                if not stream:
-                    await event.respond(f"❌ No {resolution} stream available. Falling back to best quality.")
-                    stream = yt.streams.get_highest_resolution()
-                filename = stream.download(output_path="downloads")
+        # Extract video and audio URLs
+        video_url = None
+        audio_url = None
+        for stream in video["formats"]["adaptiveFormats"]:
+            if "video" in stream["mimeType"] and not video_url:
+                video_url = stream["url"]
+            if "audio" in stream["mimeType"] and not audio_url:
+                audio_url = stream["url"]
 
-            # Send initial upload progress message
-            progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+        if not video_url or not audio_url:
+            await event.respond("❌ Failed to fetch video or audio streams.")
+            return
 
-            # Upload the file to Telegram with progress bar
-            async with client.action(user_id, 'document'):
-                await client.send_file(
-                    user_id,
-                    filename,
-                    caption="✅ Here's your file!",
-                    progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
-                )
+        # Download video and audio streams
+        video_path = f"downloads/video_{int(time.time())}.mp4"
+        audio_path = f"downloads/audio_{int(time.time())}.m4a"
+        output_path = f"downloads/output_{int(time.time())}.mp4"
 
-            # Delete the file after sending
-            if os.path.exists(filename):
-                os.remove(filename)
+        download_stream(video_url, video_path)
+        download_stream(audio_url, audio_path)
 
-        except Exception as e:
-            logger.error(f"❌ Download failed: {str(e)}")
-            await event.respond(f"❌ Download failed: {str(e)}")
+        # Merge video and audio streams
+        await event.answer("✅ Merging video and audio...")
+        merge_streams(video_path, audio_path, output_path)
+
+        # Send initial upload progress message
+        progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+
+        # Upload the file to Telegram with progress bar
+        async with client.action(user_id, 'document'):
+            await client.send_file(
+                user_id,
+                output_path,
+                caption="✅ Here's your file!",
+                progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
+            )
+
+        # Delete the file after sending
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
     except Exception as e:
         logger.error(f"❌ Error handling callback query: {e}")
         await event.respond("❌ An error occurred while processing your request. Please try again.")
+
+def download_stream(url, output_path):
+    """Download a stream using requests."""
+    response = requests.get(url, stream=True)
+    with open(output_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024):
+            f.write(chunk)
+
+def merge_streams(video_path, audio_path, output_path):
+    """Merge video and audio streams using FFmpeg."""
+    ffmpeg.input(video_path).output(ffmpeg.input(audio_path), output_path, vcodec="copy", acodec="copy").run()
+    os.remove(video_path)
+    os.remove(audio_path)
 
 async def upload_progress(current, total, user_id, progress_message):
     """Update the upload progress in real-time, but only every 10 seconds or when the upload is complete."""
