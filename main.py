@@ -1,4 +1,3 @@
-
 import os
 import logging
 import yt_dlp
@@ -13,6 +12,7 @@ import signal
 import asyncio
 from torpy import TorClient
 from torpy.http.requests import TorRequests
+import ssl
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -77,7 +77,7 @@ PENDING_REQUESTS = set()
 # Temporary User Data Storage
 user_data = {}
 
-# Initialize Tor Client
+# Tor Integration
 TOR_SOCKS_PORT = 9050  # Default Tor SOCKS port
 TOR_CONTROL_PORT = 9051  # Default Tor control port
 TOR_PASSWORD = "your_tor_password"  # Set this in your Tor configuration
@@ -91,6 +91,27 @@ def rotate_tor_circuit():
     """Rotate the Tor circuit to get a new IP."""
     with TorRequests() as tor_requests:
         tor_requests.reset_identity()
+
+# Patch for SSL compatibility with Python 3.12+
+def patch_ssl_for_torpy():
+    """
+    Patch the ssl module to ensure compatibility with Python 3.12+.
+    This replaces the deprecated `ssl.wrap_socket` with `SSLContext.wrap_socket`.
+    """
+    from torpy.cell_socket import TorSocket
+    original_connect = TorSocket.connect
+
+    def patched_connect(self):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        self._socket = context.wrap_socket(self._socket, do_handshake_on_connect=True)
+        return original_connect(self)
+
+    TorSocket.connect = patched_connect
+
+# Apply the SSL patch
+patch_ssl_for_torpy()
 
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
