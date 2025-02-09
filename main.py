@@ -1,5 +1,6 @@
 import os
 import logging
+import yt_dlp
 import time
 import random
 from telethon import TelegramClient, events, Button
@@ -9,9 +10,6 @@ from flask import Flask
 import threading
 import signal
 import asyncio
-from youtubesearchpython import Video  # Import youtube-search-python
-import ffmpeg
-import requests
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -32,6 +30,7 @@ ENCRYPTED_API_ID = os.getenv("ENCRYPTED_API_ID")  # Encrypted Telegram API ID
 ENCRYPTED_API_HASH = os.getenv("ENCRYPTED_API_HASH")  # Encrypted Telegram API Hash
 ENCRYPTED_ADMINS = os.getenv("ENCRYPTED_ADMINS")  # Encrypted comma-separated admin IDs
 BOT_TOKEN = os.getenv("BOT_T")  # Bot token (optional if using user account)
+GOFILE_API_KEY = os.getenv("GOFILEAPI")  # Gofile API key for fallback storage
 
 # Set up logging
 logging.basicConfig(
@@ -104,6 +103,9 @@ decrypt_session_file()
 
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
+
+# Global variable to store decrypted cookies in memory
+STORED_COOKIES = None
 
 @client.on(events.NewMessage(pattern="/start"))
 async def start(event):
@@ -217,12 +219,41 @@ async def receive_cookies(event):
         try:
             # Store the decrypted cookies in memory
             STORED_COOKIES = raw_cookies.decode()
-            await event.respond("✅ `cookies.txt` stored in memory!")
+            await event.respond("✅ `cookies.txt` received! Verifying cookies...")
+            
+            # Validate cookies
+            if validate_cookies(STORED_COOKIES):
+                await event.respond("✅ Cookies are valid and ready to use!")
+            else:
+                await event.respond("❌ Cookies are invalid. Please upload a valid `cookies.txt` file.")
+                STORED_COOKIES = None
         except Exception as e:
             logger.error(f"❌ Failed to process cookies: {e}")
             await event.respond("❌ Failed to process cookies. Please try again.")
     else:
         await event.respond("❌ Invalid file. Please send `cookies.txt`.")
+
+def validate_cookies(cookies):
+    """Validate cookies by testing them with yt-dlp."""
+    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  # Test URL
+    ydl_opts = {
+        "cookiefile": "temp_cookies.txt",
+        "quiet": True,
+        "extract_flat": True,
+    }
+    try:
+        with open("temp_cookies.txt", "w") as f:
+            f.write(cookies)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(test_url, download=False)
+            if info:
+                return True
+    except Exception as e:
+        logger.error(f"❌ Cookie validation failed: {e}")
+    finally:
+        if os.path.exists("temp_cookies.txt"):
+            os.remove("temp_cookies.txt")
+    return False
 
 @client.on(events.NewMessage(func=lambda e: e.sender_id in AUTHORIZED_USERS or e.sender_id in ADMINS))
 async def format_selection(event):
@@ -255,69 +286,85 @@ async def handle_format_selection(event):
             await event.respond("❌ No URL found. Please send a valid YouTube link first.")
             return
 
-        # Simulating human-like delays to avoid detection
-        time.sleep(random.uniform(5, 10))  # Increased delay to 5-10 seconds
+        # Simulating human behavior to avoid YouTube detection
+        time.sleep(random.uniform(1, 5))  # Reduced delay to 1-5 seconds
 
-        await event.answer("✅ Fetching video metadata...")
-        video = Video.getInfo(url)
+        # Configure yt-dlp options
+        ydl_opts = {
+            "progress_hooks": [lambda d: progress_hook(d, user_id)],
+            "nocheckcertificate": True,
+            "source_address": "0.0.0.0",  # Prevent blocking
+            "quiet": True,
+        }
 
-        # Extract video and audio URLs
-        video_url = None
-        audio_url = None
-        for stream in video["formats"]["adaptiveFormats"]:
-            if "video" in stream["mimeType"] and not video_url:
-                video_url = stream["url"]
-            if "audio" in stream["mimeType"] and not audio_url:
-                audio_url = stream["url"]
+        # Use stored cookies if available
+        if STORED_COOKIES:
+            with open("temp_cookies.txt", "w") as f:
+                f.write(STORED_COOKIES)
+            ydl_opts["cookiefile"] = "temp_cookies.txt"
 
-        if not video_url or not audio_url:
-            await event.respond("❌ Failed to fetch video or audio streams.")
-            return
+        # Configure format options
+        if format_type == "audio":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+        elif format_type == "best":
+            ydl_opts["format"] = "bestvideo+bestaudio/best"
+        else:
+            resolution = "1080" if format_type == "1080p" else "720" if format_type == "720p" else "480"
+            ydl_opts["format"] = f"bestvideo[height<={resolution}]+bestaudio/best"
 
-        # Download video and audio streams
-        video_path = f"downloads/video_{int(time.time())}.mp4"
-        audio_path = f"downloads/audio_{int(time.time())}.m4a"
-        output_path = f"downloads/output_{int(time.time())}.mp4"
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                filename = ydl.prepare_filename(info)
+                await event.answer("✅ Downloading...")
+                ydl.download([url])
 
-        download_stream(video_url, video_path)
-        download_stream(audio_url, audio_path)
+            # Sanitize the file name
+            if not os.path.exists(filename):
+                filename = filename.rsplit(".", 1)[0] + ".mp3" if format_type == "audio" else filename
 
-        # Merge video and audio streams
-        await event.answer("✅ Merging video and audio...")
-        merge_streams(video_path, audio_path, output_path)
+            # Send initial upload progress message
+            progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
 
-        # Send initial upload progress message
-        progress_message = await client.send_message(user_id, "📤 Uploading... 0%")
+            # Upload the file to Telegram with progress bar
+            async with client.action(user_id, 'document'):
+                await client.send_file(
+                    user_id,
+                    filename,
+                    caption="✅ Here's your file!",
+                    progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
+                )
 
-        # Upload the file to Telegram with progress bar
-        async with client.action(user_id, 'document'):
-            await client.send_file(
-                user_id,
-                output_path,
-                caption="✅ Here's your file!",
-                progress_callback=lambda current, total: upload_progress(current, total, user_id, progress_message)
-            )
+            # Delete the file after sending
+            if os.path.exists(filename):
+                os.remove(filename)
 
-        # Delete the file after sending
-        if os.path.exists(output_path):
-            os.remove(output_path)
+            # Clean up temporary cookies file
+            if os.path.exists("temp_cookies.txt"):
+                os.remove("temp_cookies.txt")
+
+        except yt_dlp.utils.DownloadError as e:
+            logger.error(f"❌ Download failed: {str(e)}")
+            await event.respond(f"❌ Download failed: {str(e)}")
+        except FloodWaitError as e:
+            await event.respond(f"⏳ Flood wait error: Retry after {e.seconds} seconds.")
+        except Exception as e:
+            logger.error(f"❌ Error: {str(e)}")
+            await event.respond(f"❌ Error: {str(e)}")
 
     except Exception as e:
         logger.error(f"❌ Error handling callback query: {e}")
         await event.respond("❌ An error occurred while processing your request. Please try again.")
 
-def download_stream(url, output_path):
-    """Download a stream using requests."""
-    response = requests.get(url, stream=True)
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            f.write(chunk)
-
-def merge_streams(video_path, audio_path, output_path):
-    """Merge video and audio streams using FFmpeg."""
-    ffmpeg.input(video_path).output(ffmpeg.input(audio_path), output_path, vcodec="copy", acodec="copy").run()
-    os.remove(video_path)
-    os.remove(audio_path)
+async def progress_hook(d, user_id):
+    """Send real-time download progress to the user."""
+    if d['status'] == 'downloading':
+        progress = d['_percent_str']
+        speed = d['_speed_str']
+        eta = d['_eta_str']
+        message = f"📥 Downloading... {progress} | Speed: {speed} | ETA: {eta}"
+        asyncio.create_task(client.send_message(user_id, message))
 
 async def upload_progress(current, total, user_id, progress_message):
     """Update the upload progress in real-time, but only every 10 seconds or when the upload is complete."""
