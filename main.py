@@ -1,3 +1,4 @@
+
 import os
 import logging
 import yt_dlp
@@ -10,7 +11,8 @@ from flask import Flask
 import threading
 import signal
 import asyncio
-import requests
+from torpy import TorClient
+from torpy.http.requests import TorRequests
 
 # Start a Web Server to keep the bot alive
 app = Flask(__name__)
@@ -75,52 +77,20 @@ PENDING_REQUESTS = set()
 # Temporary User Data Storage
 user_data = {}
 
-# Fetch Proxies from ProxyScrape API
-PROXYSCRAPE_API_URL = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
+# Initialize Tor Client
+TOR_SOCKS_PORT = 9050  # Default Tor SOCKS port
+TOR_CONTROL_PORT = 9051  # Default Tor control port
+TOR_PASSWORD = "your_tor_password"  # Set this in your Tor configuration
 
-def fetch_proxies():
-    """Fetch fresh proxies from the ProxyScrape API."""
-    try:
-        response = requests.get(PROXYSCRAPE_API_URL)
-        response.raise_for_status()  # Raise an exception for HTTP errors
-        proxies = response.text.splitlines()
-        logger.info(f"✅ Fetched {len(proxies)} proxies from ProxyScrape.")
-        return proxies
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch proxies: {e}")
-        return []
+def get_tor_session():
+    """Create a new Tor session."""
+    tor_client = TorClient()
+    return tor_client.get_guard()
 
-# Test a proxy connection
-async def test_proxy(proxy):
-    """Test if the proxy is working."""
-    ydl_opts = {
-        "proxy": proxy,
-        "quiet": True,
-        "extract_flat": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ", download=False)
-            if info:
-                return True
-    except Exception as e:
-        logger.error(f"❌ Proxy {proxy} failed: {e}")
-    return False
-
-# Find a working proxy
-async def find_working_proxy(event):
-    """Find a working proxy and notify the user."""
-    proxies = fetch_proxies()
-    if not proxies:
-        await event.respond("❌ No proxies fetched. Please try again later.")
-        return None
-    for proxy in proxies:
-        await event.respond(f"⏳ Testing proxy: {proxy}")
-        if await test_proxy(proxy):
-            await event.respond(f"✅ Connected to proxy: {proxy}")
-            return proxy
-    await event.respond("❌ All proxies failed. Please try again later.")
-    return None
+def rotate_tor_circuit():
+    """Rotate the Tor circuit to get a new IP."""
+    with TorRequests() as tor_requests:
+        tor_requests.reset_identity()
 
 # Initialize Telethon Client
 client = TelegramClient(None, API_ID, API_HASH)  # Pass None as session file if using a bot token
@@ -254,10 +224,8 @@ async def format_selection(event):
     if not url.startswith(("http://", "https://")):
         return  # Ignore non-YouTube links
 
-    # Find a working proxy
-    proxy = await find_working_proxy(event)
-    if not proxy:
-        return
+    # Rotate Tor circuit for anonymity
+    rotate_tor_circuit()
 
     # Store the URL in user_data
     user_id = event.sender_id
@@ -293,6 +261,7 @@ async def handle_format_selection(event):
             "nocheckcertificate": True,
             "source_address": "0.0.0.0",  # Prevent blocking
             "quiet": True,
+            "proxy": f"socks5h://127.0.0.1:{TOR_SOCKS_PORT}",  # Use Tor SOCKS proxy
         }
 
         # Use stored cookies if available
